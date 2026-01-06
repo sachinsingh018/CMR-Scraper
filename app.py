@@ -7,7 +7,7 @@ from io import BytesIO
 st.set_page_config(page_title="CIBIL Company Credit Extractor", layout="wide")
 st.title("🏢 CIBIL Company Credit Facilities Extractor")
 
-# ---------------- Helpers ----------------
+# ---------------- Normalization ----------------
 def normalize(text: str) -> str:
     if not text:
         return ""
@@ -15,98 +15,94 @@ def normalize(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{2,}", "\n", text)
 
-    # Normalize broken asset strings
-    text = text.replace("NON \nPERFORMING \nASSETS", "NON PERFORMING ASSETS")
-    text = text.replace("SUB￾STANDARD", "SUB-STANDARD")
-    text = text.replace("SUBSTANDARD", "SUB-STANDARD")
+    replacements = {
+        "NON \nPERFORMING \nASSETS": "NON PERFORMING ASSETS",
+        "SUBSTANDARD": "SUB-STANDARD",
+        "SUBSTANDARD": "SUB-STANDARD",
+        "₹ ": "₹",
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
 
     return text.strip()
 
-def clean_money(val: str) -> str:
+# ---------------- Money normalization ----------------
+def money_to_number(val: str):
     if not val:
         return ""
-    return val.replace("₹", "").replace(",", "").strip()
+    v = val.replace("₹", "").replace(",", "").strip()
 
-def extract(pattern: str, text: str) -> str:
-    m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-    return m.group(1).strip() if m else ""
+    if "Cr" in v:
+        return int(float(v.replace("Cr", "").strip()) * 1_00_00_000)
+    if "Lac" in v:
+        return int(float(v.replace("Lac", "").strip()) * 1_00_000)
 
-def pick_first(*vals):
-    for v in vals:
-        if v and str(v).strip():
-            return str(v).strip()
-    return ""
+    try:
+        return int(v)
+    except:
+        return v
 
-# ---------------- Section extraction ----------------
-def get_list_section(full_text: str) -> str:
-    return pick_first(
-        extract(r"LIST OF CREDIT FACILITIES(.*?)LIST OF CREDIT FACILITIES AS GUARANTOR", full_text),
-        extract(r"LIST OF CREDIT FACILITIES(.*?)(CREDIT FACILITY DETAILS|$)", full_text)
-    )
+# ---------------- Section extractors ----------------
+def section(text, start, end=None):
+    if end:
+        return re.search(rf"{start}(.*?){end}", text, re.DOTALL | re.IGNORECASE)
+    return re.search(rf"{start}(.*)", text, re.DOTALL | re.IGNORECASE)
 
-def get_details_section(full_text: str) -> str:
-    return extract(r"CREDIT FACILITY DETAILS(.*)", full_text)
+def get_list_section(text):
+    m = section(text, "LIST OF CREDIT FACILITIES", "LIST OF CREDIT FACILITIES AS GUARANTOR")
+    return m.group(1) if m else ""
 
-# ---------------- Parse LIST OF CREDIT FACILITIES ----------------
-def parse_facilities_from_list_section(list_section: str):
+def get_details_section(text):
+    m = section(text, "CREDIT FACILITY DETAILS")
+    return m.group(1) if m else ""
+
+# ---------------- Facility block parser ----------------
+def parse_facility_blocks(list_text):
     rows = []
-    if not list_section:
+    if not list_text:
         return rows
 
-    s = normalize(list_section)
+    list_text = normalize(list_text)
 
-    open_chunk = extract(r"OPEN CREDIT FACILITIES(.*?)CLOSED CREDIT FACILITIES", s)
-    closed_chunk = extract(r"CLOSED CREDIT FACILITIES(.*)", s)
+    # Split by A/C occurrences
+    parts = re.split(r"\n(?=A/C\s)", list_text)
 
-    sections = [
-        ("OPEN", open_chunk),
-        ("CLOSED", closed_chunk)
-    ]
-
-    bank_block = r"(?P<bank>(?:[A-Za-z][A-Za-z &]+(?:\n[A-Za-z][A-Za-z &]+)*)?)"
-    loan_type = r"(?P<loan>[A-Za-z ]+loan|Bank guarantee|Cash credit)"
-    ac_opened = r"A/C\s+(?P<ac>[A-Z0-9/.\-]+)\s*\|\s*Opened:\s*(?P<opened>\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})"
-    sanc = r"₹\s*(?P<sanc>[0-9,]+)"
-    asset = r"(?P<asset>STANDARD|DOUBTFUL|SUB-STANDARD|NON PERFORMING ASSETS|0 DAY PAST DUE)"
-    dt = r"\d{1,2}\s+[A-Za-z]{3},?\s+\d{4}"
-
-    open_row = re.compile(
-        rf"{bank_block}\n{loan_type}\n{ac_opened}.*?{sanc}.*?{asset}.*?(?P<reported>{dt})",
-        re.IGNORECASE | re.DOTALL
-    )
-
-    closed_row = re.compile(
-        rf"{bank_block}\n{loan_type}\n{ac_opened}.*?{sanc}.*?(?P<closed>{dt}).*?{asset}",
-        re.IGNORECASE | re.DOTALL
-    )
-
-    def norm_bank(b):
-        return re.sub(r"\s+", " ", (b or "")).strip()
-
-    for status, chunk in sections:
-        if not chunk:
+    for p in parts:
+        if "A/C" not in p:
             continue
 
-        chunk = normalize(chunk)
-        pattern = open_row if status == "OPEN" else closed_row
+        acc = re.search(r"A/C\s+([A-Z0-9/.\-]+)", p)
+        if not acc:
+            continue
+        acc_no = acc.group(1)
 
-        for m in pattern.finditer(chunk):
-            rows.append({
-                "Member Name": norm_bank(m.group("bank")),
-                "Account Type": m.group("loan"),
-                "Account Number": m.group("ac"),
-                "Ownership": "Company",
-                "Sanctioned Amount (₹)": clean_money(m.group("sanc")),
-                "Current Balance (₹)": "",
-                "Amount Overdue (₹)": "",
-                "Date Opened": m.group("opened"),
-                "Date Closed": m.groupdict().get("closed", ""),
-                "Date Reported": m.groupdict().get("reported", ""),
-                "Status of Loan": "Closed" if status == "CLOSED" else m.group("asset"),
-                "Facility Status": status
-            })
+        bank = re.search(r"^([A-Za-z &\n]+)", p)
+        loan = re.search(r"(Demand loan|Bank guarantee|Cash credit|Short term loan)", p, re.I)
+        opened = re.search(r"Opened:\s*([0-9]{1,2}\s+[A-Za-z]{3},?\s+[0-9]{4})", p)
+        amount = re.search(r"₹([0-9,]+)", p)
+        asset = re.search(r"(STANDARD|SUB-STANDARD|DOUBTFUL|NON PERFORMING ASSETS|0 DAY PAST DUE)", p)
+        reported = re.search(r"([0-9]{1,2}\s+[A-Za-z]{3},?\s+[0-9]{4})", p)
 
-    # Deduplicate
+        is_closed = "CLOSED CREDIT FACILITIES" in list_text and acc_no in list_text
+        is_delinquent = asset and asset.group(1) not in ["STANDARD", "0 DAY PAST DUE"]
+
+        rows.append({
+            "Member Name": re.sub(r"\s+", " ", bank.group(1)).strip() if bank else "",
+            "Account Type": loan.group(1) if loan else "",
+            "Account Number": acc_no,
+            "Ownership": "Company",
+            "Facility Status": "CLOSED" if is_closed else "OPEN",
+            "Is Delinquent": bool(is_delinquent),
+            "Asset Classification": asset.group(1) if asset else "",
+            "Sanctioned Amount (₹)": money_to_number(amount.group(1)) if amount else "",
+            "Date Opened": opened.group(1) if opened else "",
+            "Date Closed": "",
+            "Date Reported": reported.group(1) if reported else "",
+            "Outstanding Balance (₹)": "",
+            "Amount Overdue (₹)": ""
+        })
+
+    # De-dup
     seen = set()
     final = []
     for r in rows:
@@ -116,51 +112,39 @@ def parse_facilities_from_list_section(list_section: str):
 
     return final
 
-# ---------------- Parse CREDIT FACILITY DETAILS ----------------
-def build_details_index(details_text: str):
-    idx = {}
+# ---------------- Details enrichment ----------------
+def enrich_from_details(rows, details_text):
     if not details_text:
-        return idx
+        return rows
 
-    t = normalize(details_text)
-    blocks = re.split(r"\n(?=A/C:\s*)", t)
+    details_text = normalize(details_text)
+    blocks = re.split(r"\n(?=A/C:\s)", details_text)
 
+    index = {}
     for b in blocks:
-        acc = extract(r"A/C:\s*([A-Z0-9/.\-]+)", b)
+        acc = re.search(r"A/C:\s*([A-Z0-9/.\-]+)", b)
         if not acc:
             continue
-
-        idx[acc] = {
-            "status": extract(r"\b(OPEN|CLOSED)\b", b),
-            "asset": extract(r"\n(STANDARD|DOUBTFUL|SUB-STANDARD|NON PERFORMING ASSETS|0 DAY PAST DUE)\s+Last Reported", b),
-            "reported": extract(r"Last Reported\s*\n\s*([0-9]{1,2}\s+[A-Za-z]{3}\s+[0-9]{4})", b),
-            "outstanding": clean_money(extract(r"OUTSTANDING BALANCE\s*₹\s*([0-9,]+)", b)),
-            "overdue": clean_money(extract(r"([0-9,]+)\s+[0-9]{1,2}\s+[A-Za-z]{3}\s+[0-9]{4}\s+OVERDUE", b))
+        index[acc.group(1)] = {
+            "outstanding": money_to_number(
+                extract := re.search(r"OUTSTANDING BALANCE\s*₹([0-9,]+)", b).group(1)
+                if re.search(r"OUTSTANDING BALANCE\s*₹([0-9,]+)", b) else ""
+            ),
+            "overdue": money_to_number(
+                extract := re.search(r"([0-9,]+)\s+[0-9]{1,2}\s+[A-Za-z]{3}\s+[0-9]{4}\s+OVERDUE", b).group(1)
+                if re.search(r"OVERDUE", b) else ""
+            )
         }
 
-    return idx
-
-def enrich_from_details(rows, details_index):
     for r in rows:
-        d = details_index.get(r["Account Number"])
-        if not d:
-            continue
-
-        r["Current Balance (₹)"] = pick_first(d.get("outstanding"))
-        r["Amount Overdue (₹)"] = pick_first(d.get("overdue"), "0")
-        r["Date Reported"] = pick_first(d.get("reported"), r["Date Reported"])
-
-        if d.get("status") == "CLOSED":
-            r["Status of Loan"] = "Closed"
-            if not r["Date Closed"]:
-                r["Date Closed"] = d.get("reported", "")
-
-        if r["Status of Loan"] != "Closed":
-            r["Status of Loan"] = pick_first(d.get("asset"), r["Status of Loan"])
+        d = index.get(r["Account Number"])
+        if d:
+            r["Outstanding Balance (₹)"] = d.get("outstanding", "")
+            r["Amount Overdue (₹)"] = d.get("overdue", "")
 
     return rows
 
-# ---------------- Streamlit UI ----------------
+# ---------------- UI ----------------
 uploaded = st.file_uploader("Upload Company CIBIL PDF", type=["pdf"])
 
 if uploaded:
@@ -169,18 +153,17 @@ if uploaded:
 
     text = normalize(raw)
 
-    rows = parse_facilities_from_list_section(get_list_section(text))
-    rows = enrich_from_details(rows, build_details_index(get_details_section(text)))
+    rows = parse_facility_blocks(get_list_section(text))
+    rows = enrich_from_details(rows, get_details_section(text))
 
-    EXPECTED_COLUMNS = [
+    COLUMNS = [
         "Member Name", "Account Type", "Account Number", "Ownership",
-        "Sanctioned Amount (₹)", "Current Balance (₹)", "Amount Overdue (₹)",
-        "Date Opened", "Date Closed", "Date Reported",
-        "Status of Loan", "Facility Status"
+        "Facility Status", "Is Delinquent", "Asset Classification",
+        "Sanctioned Amount (₹)", "Outstanding Balance (₹)", "Amount Overdue (₹)",
+        "Date Opened", "Date Closed", "Date Reported"
     ]
 
-    df = pd.DataFrame(rows)
-    df = df.reindex(columns=EXPECTED_COLUMNS)
+    df = pd.DataFrame(rows).reindex(columns=COLUMNS)
 
     st.success(f"Extracted {len(df)} credit facilities")
     st.dataframe(df, use_container_width=True)
@@ -191,6 +174,6 @@ if uploaded:
     st.download_button(
         "⬇️ Download Excel",
         out.getvalue(),
-        "company_cibil_flat_accounts.xlsx",
+        "cibil_company_credit_facilities.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
