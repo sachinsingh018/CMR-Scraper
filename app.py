@@ -50,14 +50,9 @@ def money_to_number(val: str):
 # Page-aware PDF extraction
 # --------------------------------------------------
 def extract_relevant_text(pdf):
-    """
-    CIBIL company reports:
-    - Pages 0–3  : cover, invoice, summary, profile
-    - Page >= 4  : credit facilities + details
-    """
     pages_text = []
     for i, page in enumerate(pdf.pages):
-        if i >= 4:  # 👈 HARD RULE
+        if i >= 4:  # STRICT RULE: start only after page 4
             pages_text.append(page.extract_text() or "")
     return normalize("\n".join(pages_text))
 
@@ -82,6 +77,24 @@ def get_details_section(text):
     return extract_section(text, "CREDIT FACILITY DETAILS")
 
 # --------------------------------------------------
+# Helpers for classification
+# --------------------------------------------------
+def detect_facility_status(block_text: str):
+    return "CLOSED" if re.search(r"\bCLOSED\b", block_text, re.IGNORECASE) else "OPEN"
+
+def detect_facility_bucket(block_text: str):
+    if re.search(r"NON PERFORMING ASSETS|DOUBTFUL|SUB-STANDARD", block_text):
+        return "DELINQUENT"
+    return "REGULAR"
+
+def detect_adverse_flags(text: str):
+    return {
+        "Suit Filed": bool(re.search(r"SUIT FILED", text)),
+        "Written Off": bool(re.search(r"WRITTEN OFF", text)),
+        "Invoked": bool(re.search(r"INVOKED|DEVOLVED", text)),
+    }
+
+# --------------------------------------------------
 # Facility block parsing (LIST OF CREDIT FACILITIES)
 # --------------------------------------------------
 def parse_facility_blocks(list_text):
@@ -90,8 +103,6 @@ def parse_facility_blocks(list_text):
         return rows
 
     list_text = normalize(list_text)
-
-    # Split by A/C blocks
     blocks = re.split(r"\n(?=A/C\s)", list_text)
 
     for b in blocks:
@@ -103,7 +114,7 @@ def parse_facility_blocks(list_text):
             continue
         acc_no = acc.group(1)
 
-        bank = re.search(r"^([A-Za-z &\n]+)", b)
+        bank = re.search(r"^([A-Za-z &]+(?:\n[A-Za-z &]+)*)", b)
         loan = re.search(r"(Demand loan|Bank guarantee|Cash credit|Short term loan)", b, re.I)
         opened = re.search(r"Opened:\s*([0-9]{1,2}\s+[A-Za-z]{3},?\s+[0-9]{4})", b)
         amount = re.search(r"₹([0-9,]+)", b)
@@ -118,18 +129,22 @@ def parse_facility_blocks(list_text):
             "Account Type": loan.group(1) if loan else "",
             "Account Number": acc_no,
             "Ownership": "Company",
-            "Facility Status": "CLOSED" if "CLOSED CREDIT FACILITIES" in list_text else "OPEN",
-            "Is Delinquent": bool(asset and asset.group(1) not in ["STANDARD", "0 DAY PAST DUE"]),
+            "Facility Status": detect_facility_status(b),
+            "Facility Bucket": detect_facility_bucket(b),
+            "Is Delinquent": detect_facility_bucket(b) == "DELINQUENT",
             "Asset Classification": asset.group(1) if asset else "",
             "Sanctioned Amount (₹)": money_to_number(amount.group(1)) if amount else "",
             "Outstanding Balance (₹)": "",
             "Amount Overdue (₹)": "",
+            "Suit Filed": False,
+            "Written Off": False,
+            "Invoked": False,
             "Date Opened": opened.group(1) if opened else "",
             "Date Closed": "",
             "Date Reported": reported.group(1) if reported else ""
         })
 
-    # Deduplicate
+    # Deduplicate by Account Number
     seen = set()
     final = []
     for r in rows:
@@ -161,16 +176,32 @@ def enrich_from_details(rows, details_text):
             ) if re.search(r"OUTSTANDING BALANCE", b) else "",
             "overdue": money_to_number(
                 re.search(r"([0-9,]+)\s+[0-9]{1,2}\s+[A-Za-z]{3}\s+[0-9]{4}\s+OVERDUE", b).group(1)
-            ) if re.search(r"OVERDUE", b) else ""
+            ) if re.search(r"OVERDUE", b) else "",
+            **detect_adverse_flags(b)
         }
 
     for r in rows:
         d = index.get(r["Account Number"])
         if d:
-            r["Outstanding Balance (₹)"] = d["outstanding"]
-            r["Amount Overdue (₹)"] = d["overdue"]
+            r["Outstanding Balance (₹)"] = d.get("outstanding", "")
+            r["Amount Overdue (₹)"] = d.get("overdue", "")
+            r["Suit Filed"] = d.get("Suit Filed", False)
+            r["Written Off"] = d.get("Written Off", False)
+            r["Invoked"] = d.get("Invoked", False)
 
     return rows
+
+# --------------------------------------------------
+# Risk derivation
+# --------------------------------------------------
+def derive_risk(row):
+    if row["Written Off"]:
+        return "VERY HIGH"
+    if row["Suit Filed"] or row["Asset Classification"] == "NON PERFORMING ASSETS":
+        return "HIGH"
+    if row["Facility Bucket"] == "DELINQUENT":
+        return "MEDIUM"
+    return "LOW"
 
 # --------------------------------------------------
 # Streamlit UI
@@ -184,14 +215,20 @@ if uploaded:
     rows = parse_facility_blocks(get_list_section(text))
     rows = enrich_from_details(rows, get_details_section(text))
 
+    df = pd.DataFrame(rows)
+
+    df["Risk Level"] = df.apply(derive_risk, axis=1)
+
     COLUMNS = [
         "Member Name", "Account Type", "Account Number", "Ownership",
-        "Facility Status", "Is Delinquent", "Asset Classification",
+        "Facility Status", "Facility Bucket", "Is Delinquent",
+        "Asset Classification", "Risk Level",
         "Sanctioned Amount (₹)", "Outstanding Balance (₹)", "Amount Overdue (₹)",
+        "Suit Filed", "Written Off", "Invoked",
         "Date Opened", "Date Closed", "Date Reported"
     ]
 
-    df = pd.DataFrame(rows).reindex(columns=COLUMNS)
+    df = df.reindex(columns=COLUMNS)
 
     st.success(f"Extracted {len(df)} credit facilities")
     st.dataframe(df, use_container_width=True)
