@@ -99,7 +99,7 @@ if uploaded_file is not None:
     excel_buffer = io.BytesIO()
 
     with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
-    df.to_excel(writer, index=False, sheet_name="Credit Facilities")
+        df.to_excel(writer, index=False, sheet_name="Credit Facilities")
 
     st.download_button(
     label="⬇️ Download Excel",
