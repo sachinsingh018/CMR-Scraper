@@ -91,27 +91,13 @@ if uploaded_file is not None:
     st.subheader("📊 Extracted Credit Facilities")
     st.dataframe(df, use_container_width=True)
 
-    # CSV download (Streamlit-native replacement for files.download)
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-
-    # Excel download
     excel_buffer = io.BytesIO()
-
     with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Credit Facilities")
 
     st.download_button(
-    label="⬇️ Download Excel",
-    data=excel_buffer.getvalue(),
-    file_name="company_cibil_credit_facilities.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-
-    st.download_button(
-        label="⬇️ Download CSV",
-        data=csv_buffer.getvalue(),
-        file_name="company_cibil_credit_facilities.csv",
-        mime="text/csv"
+        label="⬇️ Download Excel",
+        data=excel_buffer.getvalue(),
+        file_name="company_cibil_credit_facilities.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
