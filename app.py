@@ -92,12 +92,13 @@ if uploaded_file is not None:
     st.dataframe(df, use_container_width=True)
 
     excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
+
+    with pd.ExcelWriter(excel_buffer) as writer:
         df.to_excel(writer, index=False, sheet_name="Credit Facilities")
 
     st.download_button(
-        label="⬇️ Download Excel",
-        data=excel_buffer.getvalue(),
-        file_name="company_cibil_credit_facilities.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    label="⬇️ Download Excel",
+    data=excel_buffer.getvalue(),
+    file_name="company_cibil_credit_facilities.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
