@@ -65,7 +65,6 @@ if uploaded_file is not None:
 
 
 
-    st.caption(f"Facility blocks found: {len(facility_blocks)}")
     st.caption(f"Raw blocks found: {len(raw_blocks)}")
 
     records = []
