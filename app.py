@@ -30,31 +30,29 @@ def clean_amount(val):
 
 def extract_bank_and_loan(block):
     """
-    FIRST non-empty line of each block ALWAYS contains:
-    <BANK NAME> <LOAN TYPE>
+    Bank + Loan Type always appear in the line immediately
+    preceding the 'A/C:' line
     """
     lines = [l.strip() for l in block.splitlines() if l.strip()]
-    if not lines:
-        return "", ""
 
-    header = lines[0]
+    for i, line in enumerate(lines):
+        if line.startswith("A/C:") and i > 0:
+            header = lines[i - 1]
 
-    bank = extract(
-        r"([A-Z ]+BANK(?: LIMITED| LTD| PRIME LTD| FIRST BANK LIMITED)?)",
-        header
-    )
+            # split last word group as loan type, rest as bank
+            m = re.match(r"(.+?)\s+(Overdraft|Property Loan|HealthCare Finance|GECL Loan|Auto Loan|"
+                         r"Cash Credit|"
+                         r"Long term loan .*?|"
+                         r"Medium term loan .*?|"
+                         r"Short term loan .*?|"
+                         r"Equipment financing .*?)$", header)
 
-    loan = extract(
-        r"(Overdraft|Property Loan|Demand loan|GECL Loan|Cash Credit|"
-        r"Long term loan \(period above 3 years\)|"
-        r"Medium term loan \(period above 1 year and up to 3 years\)|"
-        r"Short term loan \(less than 1 year\)|"
-        r"Equipment financing \(.*?\)|"
-        r"HealthCare Finance|Auto Loan)",
-        header
-    )
+            if m:
+                return m.group(1).strip(), m.group(2).strip()
 
-    return bank, loan
+            return header, ""
+
+    return "", ""
 
 
 # -------------------------
@@ -80,7 +78,7 @@ if uploaded_file:
     credit_text = full_text[start.start():]
 
     # One block per account
-    blocks = re.split(r"\n(?=[A-Z ]+BANK)", credit_text)
+    blocks = re.split(r"\n(?=LOAN INFORMATION)", credit_text)
     st.caption(f"Facility blocks found: {len(blocks)}")
 
     records = []
@@ -96,11 +94,15 @@ if uploaded_file:
             "Loan Type": loan_type,
             "Account Number": extract(r"A/C:\s*([A-Z0-9/-]+)", block),
             "Account Status": extract(r"\b(OPEN|CLOSED)\b", block),
-            "Asset Classification": extract(
-                r"(STANDARD|SUB-STANDARD|DOUBTFUL|NON PERFORMING ASSETS|"
-                r"\d+\s*DAY[S]?\s*PAST\s*DUE|0\s*DAY\s*PAST\s*DUE)",
+            "Days Past Due": extract(
+                r"(\d+\s*DAY[S]?\s*PAST\s*DUE)",
                 block
             ),
+            "Asset Classification": extract(
+                r"\b(STANDARD|SUB-STANDARD|DOUBTFUL|LOSS|NPA)\b",
+                block
+            ),
+
             "Sanctioned Amount": clean_amount(
                 extract(r"SANCTIONED AMOUNT ₹([0-9,]+)", block)
             ),
