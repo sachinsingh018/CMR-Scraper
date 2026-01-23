@@ -10,6 +10,11 @@ st.title("📄 Company CIBIL – Credit Facility Extractor")
 
 uploaded_file = st.file_uploader("Upload CIBIL PDF", type=["pdf"])
 
+
+def extract_line(pattern, text):
+    m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+    return m.group(1).strip() if m else ""
+
 def normalize_text(text):
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{2,}", "\n", text)
@@ -27,7 +32,10 @@ def clean_amount(val):
 if uploaded_file is not None:
     with st.spinner("Extracting text from PDF..."):
         with pdfplumber.open(uploaded_file) as pdf:
-            raw_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            raw_text = "\n".join(
+                        page.extract_text() or ""
+                        for page in pdf.pages[6:]   # 👈 START FROM PAGE 7
+                        )
 
         full_text = normalize_text(raw_text)
 
@@ -48,7 +56,13 @@ if uploaded_file is not None:
         credit_text
     )
 
-    raw_blocks = re.split(r"\n(?=A/C:\s*)", credit_text)
+    raw_blocks = re.split(
+                r"\n(?=[A-Z][A-Z &]+ (Overdraft|Property Loan|Demand loan|GECL Loan|Cash Credit|"
+                r"Long term loan|Medium term loan|Short term loan|Equipment financing|HealthCare Finance))",
+                credit_text
+        )
+
+
 
     st.caption(f"Facility blocks found: {len(facility_blocks)}")
     st.caption(f"Raw blocks found: {len(raw_blocks)}")
@@ -73,8 +87,8 @@ if uploaded_file is not None:
             "Outstanding Balance": clean_amount(
                 extract(r"OUTSTANDING BALANCE ₹([0-9,]+)", block)
             ),
-            "Sanctioned Date": extract(r"SANCTIONED DATE\s*([0-9A-Za-z ]+)", block),
-            "Last Reported Date": extract(r"Last Reported\s*([0-9A-Za-z ]+)", block),
+            "Sanctioned Date": extract_line(r"^SANCTIONED DATE\s+(.+)$", block),
+            "Last Reported Date": extract_line(r"^Last Reported\s*\n?(.+)$", block),
             "Repayment Frequency": extract(r"REPAYMENT FREQUENCY\s*([A-Za-z]+)", block),
             "Loan Expiry / Maturity": extract(
                 r"LOAN EXPIRY/MATURITY\s*([0-9A-Za-z -]+)", block
