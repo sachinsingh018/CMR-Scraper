@@ -29,30 +29,30 @@ def clean_amount(val):
     return re.sub(r"[₹, ]", "", val)
 
 def extract_bank_and_loan(block):
-    """
-    Bank + Loan Type always appear in the line immediately
-    preceding the 'A/C:' line
-    """
     lines = [l.strip() for l in block.splitlines() if l.strip()]
 
+    bank = ""
+    loan = ""
+
     for i, line in enumerate(lines):
-        if line.startswith("A/C:") and i > 0:
-            header = lines[i - 1]
+        if line.startswith("A/C:"):
+            # walk backwards safely
+            for j in range(i - 1, -1, -1):
+                txt = lines[j]
 
-            # split last word group as loan type, rest as bank
-            m = re.match(r"(.+?)\s+(Overdraft|Property Loan|HealthCare Finance|GECL Loan|Auto Loan|"
-                         r"Cash Credit|"
-                         r"Long term loan .*?|"
-                         r"Medium term loan .*?|"
-                         r"Short term loan .*?|"
-                         r"Equipment financing .*?)$", header)
+                # bank names are FULL CAPS and short
+                if re.fullmatch(r"[A-Z ]{5,}", txt) and "DISPUTE" not in txt:
+                    bank = txt
+                    continue
 
-            if m:
-                return m.group(1).strip(), m.group(2).strip()
+                # loan type is usually Title Case
+                if bank and loan == "":
+                    loan = txt
+                    break
 
-            return header, ""
+            break
 
-    return "", ""
+    return bank, loan
 
 
 # -------------------------
