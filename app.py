@@ -78,10 +78,13 @@ if uploaded_file:
     credit_text = full_text[start.start():]
 
     # One block per account
-    blocks = re.split(
-    r"\n(?=[A-Z][A-Z &]+\nA/C:\s*)",
-    credit_text
-        )
+    blocks = re.split(r"\n(?=A/C:\s*)", credit_text)
+
+    blocks = [
+        blocks[i - 1] + "\n" + blocks[i] if i > 0 else blocks[i]
+        for i in range(len(blocks))
+        ]
+
 
     st.caption(f"Facility blocks found: {len(blocks)}")
 
