@@ -64,7 +64,7 @@ if uploaded_file:
         with pdfplumber.open(uploaded_file) as pdf:
             raw_text = "\n".join(
                 page.extract_text() or ""
-                for page in pdf.pages[6:]  # PAGE 7 ONWARDS (0-based)
+                for page in pdf.pages[4:]  # PAGE 7 ONWARDS (0-based)
             )
 
     full_text = normalize_text(raw_text)
