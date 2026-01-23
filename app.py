@@ -84,7 +84,7 @@ if uploaded_file:
     credit_text = credit_text.split("LIST OF CREDIT FACILITIES AS GUARANTOR")[0]
 
 # split when a BANK NAME starts (full caps line)
-            blocks = re.split(
+    blocks = re.split(
             r"\n(?=[A-Z][A-Z ]+\n[A-Za-z])",
             credit_text
         )
