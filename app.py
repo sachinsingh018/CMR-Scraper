@@ -111,8 +111,10 @@ if uploaded_file:
                 r"SANCTIONED DATE\s+([0-9A-Za-z ,]+)", block
             ),
             "Last Reported Date": extract(
-                r"Last Reported\s*\n?\s*([0-9A-Za-z ,]+)", block
+            r"Last Reported\s*\n\s*([0-9]{1,2}\s+[A-Za-z]{3}\s+[0-9]{4})",
+            block
             ),
+
             "Repayment Frequency": extract(
                 r"REPAYMENT FREQUENCY\s*([A-Za-z]+)", block
             ),
