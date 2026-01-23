@@ -81,6 +81,9 @@ if uploaded_file:
         st.stop()
 
     # isolate only the CREDIT FACILITY DETAILS body
+    #credit_text = credit_text.split("LIST OF CREDIT FACILITIES AS GUARANTOR")[0]
+    # isolate only the CREDIT FACILITY DETAILS body
+    credit_text = full_text[start.start():]
     credit_text = credit_text.split("LIST OF CREDIT FACILITIES AS GUARANTOR")[0]
 
 # split when a BANK NAME starts (full caps line)
