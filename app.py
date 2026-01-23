@@ -10,9 +10,9 @@ st.title("📄 Company CIBIL – Credit Facility Extractor")
 uploaded_file = st.file_uploader("Upload CIBIL PDF", type=["pdf"])
 
 
-# -----------------------------
+# -------------------------
 # Helpers
-# -----------------------------
+# -------------------------
 
 def normalize_text(text):
     text = re.sub(r"[ \t]+", " ", text)
@@ -28,39 +28,45 @@ def clean_amount(val):
         return ""
     return re.sub(r"[₹, ]", "", val)
 
-def extract_bank_and_loan_from_block(block):
+def extract_bank_and_loan(block):
     """
-    BANK + LOAN is ALWAYS on the line just above 'A/C:'
+    FIRST non-empty line of each block ALWAYS contains:
+    <BANK NAME> <LOAN TYPE>
     """
     lines = [l.strip() for l in block.splitlines() if l.strip()]
+    if not lines:
+        return "", ""
 
-    for i, line in enumerate(lines):
-        if line.startswith("A/C"):
-            header = lines[max(0, i-3):i]
-            header_text = " ".join(header)
+    header = lines[0]
 
-            bank = extract(r"([A-Z ]+BANK(?: LIMITED| LTD| PRIME LTD)?)", header_text)
-            loan = extract(
-                r"(Overdraft|Property Loan|Demand loan|GECL Loan|Cash Credit|"
-                r"Long term loan|Medium term loan|Short term loan|"
-                r"Equipment financing|HealthCare Finance|Auto Loan)",
-                header_text
-            )
-            return bank, loan
+    bank = extract(
+        r"([A-Z ]+BANK(?: LIMITED| LTD| PRIME LTD| FIRST BANK LIMITED)?)",
+        header
+    )
 
-    return "", ""
+    loan = extract(
+        r"(Overdraft|Property Loan|Demand loan|GECL Loan|Cash Credit|"
+        r"Long term loan \(period above 3 years\)|"
+        r"Medium term loan \(period above 1 year and up to 3 years\)|"
+        r"Short term loan \(less than 1 year\)|"
+        r"Equipment financing \(.*?\)|"
+        r"HealthCare Finance|Auto Loan)",
+        header
+    )
+
+    return bank, loan
 
 
-# -----------------------------
+# -------------------------
 # Main
-# -----------------------------
+# -------------------------
 
 if uploaded_file:
     with st.spinner("Extracting text from PDF..."):
         with pdfplumber.open(uploaded_file) as pdf:
             raw_text = "\n".join(
                 page.extract_text() or ""
-                for page in pdf.pages[5:]   # 🔒 PAGE 6 ONWARDS ONLY
+                for page in pdf.pages[6:]  # PAGE 7 ONWARDS (0-based)
             )
 
     full_text = normalize_text(raw_text)
@@ -73,9 +79,9 @@ if uploaded_file:
 
     credit_text = full_text[start.start():]
 
-    # 🔑 One block per account
-    blocks = re.split(r"\n(?=A/C:\s*)", credit_text)
-    st.caption(f"Accounts found: {len(blocks)}")
+    # One block per account
+    blocks = re.split(r"\n(?=[A-Z ]+BANK)", credit_text)
+    st.caption(f"Facility blocks found: {len(blocks)}")
 
     records = []
 
@@ -83,7 +89,7 @@ if uploaded_file:
         if "A/C:" not in block:
             continue
 
-        bank_name, loan_type = extract_bank_and_loan_from_block(block)
+        bank_name, loan_type = extract_bank_and_loan(block)
 
         records.append({
             "Bank Name": bank_name,
