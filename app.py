@@ -34,7 +34,8 @@ if uploaded_file is not None:
         with pdfplumber.open(uploaded_file) as pdf:
             raw_text = "\n".join(
                         page.extract_text() or ""
-                        for page in pdf.pages[6:]   # 👈 START FROM PAGE 7
+                        for page in pdf.pages[5:]   # page 6 onwards (0-based index)
+  # 👈 START FROM PAGE 7
                         )
 
         full_text = normalize_text(raw_text)
@@ -51,10 +52,10 @@ if uploaded_file is not None:
     st.info("Starting extraction from CREDIT FACILITY DETAILS")
 
     # EXACT same logic as your notebook
-    facility_blocks = re.split(
-        r"\n(?=[A-Z &]+ (Demand loan|Bank guarantee|Cash credit|Short term loan))",
-        credit_text
-    )
+    # facility_blocks = re.split(
+    #     r"\n(?=[A-Z &]+ (Demand loan|Bank guarantee|Cash credit|Short term loan))",
+    #     credit_text
+    # )
 
     raw_blocks = re.split(
                 r"\n(?=[A-Z][A-Z &]+ (Overdraft|Property Loan|Demand loan|GECL Loan|Cash Credit|"
@@ -70,12 +71,22 @@ if uploaded_file is not None:
     records = []
 
     for block in raw_blocks:
-        if not block.strip().startswith("A/C:"):
+        if "A/C:" not in block:
             continue
 
+        bank_match = re.search(
+            r"^([A-Z][A-Z &]+)\s+"
+            r"(Overdraft|Property Loan|Demand loan|GECL Loan|Cash Credit|"
+            r"Long term loan|Medium term loan|Short term loan|Equipment financing|HealthCare Finance)",
+            block,
+            re.MULTILINE)
+
+        bank_name = bank_match.group(1).strip() if bank_match else ""
+        loan_type = bank_match.group(2).strip() if bank_match else ""
+
         record = {
-            "Bank Name": extract(r"([A-Z &]{3,})\s+(Demand loan|Bank guarantee|Cash credit|Short term loan)", block),
-            "Loan Type": extract(r"(Demand loan|Bank guarantee|Cash credit|Short term loan)", block),
+            "Bank Name": bank_name,
+            "Loan Type": loan_type,
             "Account Number": extract(r"A/C:\s*([A-Z0-9/-]+)", block),
             "Account Status": extract(r"\b(OPEN|CLOSED)\b", block),
             "Asset Classification": extract(
@@ -88,7 +99,9 @@ if uploaded_file is not None:
                 extract(r"OUTSTANDING BALANCE ₹([0-9,]+)", block)
             ),
             "Sanctioned Date": extract_line(r"^SANCTIONED DATE\s+(.+)$", block),
-            "Last Reported Date": extract_line(r"^Last Reported\s*\n?(.+)$", block),
+            "Last Reported Date": extract(
+                r"Last Reported\s*\n\s*([0-9A-Za-z ,]+)", block
+            ),
             "Repayment Frequency": extract(r"REPAYMENT FREQUENCY\s*([A-Za-z]+)", block),
             "Loan Expiry / Maturity": extract(
                 r"LOAN EXPIRY/MATURITY\s*([0-9A-Za-z -]+)", block
