@@ -78,7 +78,11 @@ if uploaded_file:
     credit_text = full_text[start.start():]
 
     # One block per account
-    blocks = re.split(r"\n(?=LOAN INFORMATION)", credit_text)
+    blocks = re.split(
+    r"\n(?=[A-Z][A-Z &]+\nA/C:\s*)",
+    credit_text
+        )
+
     st.caption(f"Facility blocks found: {len(blocks)}")
 
     records = []
@@ -113,9 +117,10 @@ if uploaded_file:
                 r"SANCTIONED DATE\s+([0-9A-Za-z ,]+)", block
             ),
             "Last Reported Date": extract(
-                r"Last Reported[\s\S]{0,50}?([0-9]{1,2}\s+[A-Za-z]{3},?\s+[0-9]{4})",
+                r"Last Reported[\s\S]{0,80}?([0-9]{1,2}\s+[A-Za-z]{3},?\s+[0-9]{4})",
                 block
             ),
+
             "Repayment Frequency": extract(
                 r"REPAYMENT FREQUENCY\s*([A-Za-z]+)", block
             ),
