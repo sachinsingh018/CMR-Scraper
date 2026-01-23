@@ -70,7 +70,12 @@ if uploaded_file:
     full_text = normalize_text(raw_text)
     st.success(f"Characters extracted: {len(full_text)}")
 
-    start = re.search(r"CREDIT FACILITY DETAILS", full_text, re.IGNORECASE)
+    start = re.search(
+    r"CREDIT\s+FACILITY\s+DETAILS",
+    full_text,
+    re.IGNORECASE | re.MULTILINE
+        )
+
     if not start:
         st.error("CREDIT FACILITY DETAILS section not found")
         st.stop()
