@@ -80,10 +80,15 @@ if uploaded_file:
         st.error("CREDIT FACILITY DETAILS section not found")
         st.stop()
 
-    credit_text = full_text[start.start():]
+    # isolate only the CREDIT FACILITY DETAILS body
+    credit_text = credit_text.split("LIST OF CREDIT FACILITIES AS GUARANTOR")[0]
 
-    # One block per account
-    blocks = re.split(r"\n(?=A/C:\s*)", credit_text)
+# split when a BANK NAME starts (full caps line)
+            blocks = re.split(
+            r"\n(?=[A-Z][A-Z ]+\n[A-Za-z])",
+            credit_text
+        )
+
 
     blocks = [
         blocks[i - 1] + "\n" + blocks[i] if i > 0 else blocks[i]
