@@ -5,30 +5,25 @@ import pdfplumber
 import pandas as pd
 import streamlit as st
 from io import BytesIO
-from tenacity import retry, stop_after_attempt, wait_exponential
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any
 
-# NEW: Gemini official Python SDK
-from google import genai
+# ✅ OpenAI SDK
+from openai import OpenAI
 
 
 # =============================
 # CONFIG
 # =============================
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    st.error("Missing GEMINI_API_KEY in Streamlit secrets")
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    st.error("Missing OPENAI_API_KEY in Streamlit secrets")
     st.stop()
 
-# SDK expects env var by default
-os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Choose model (you can swap to gemini-2.5-flash if you want)
-MODEL = "gemini-2.0-flash"
-
-# Create client once
-client = genai.Client()
+# Best balance of quality + speed for structured extraction
+MODEL = "gpt-4.1-mini"
 
 
 # =============================
@@ -98,8 +93,7 @@ def split_account_blocks(text: str) -> List[str]:
     ]
 
 
-def _build_gemini_prompt(block: str, header: Dict[str, str]) -> str:
-    # Keep your schema + approach exactly; only change transport layer to SDK.
+def _build_prompt(block: str, header: Dict[str, str]) -> str:
     system_prompt = """
 Return ONLY valid JSON matching this schema. No markdown. No text.
 
@@ -127,7 +121,6 @@ Return ONLY valid JSON matching this schema. No markdown. No text.
 }
 """.strip()
 
-    # IMPORTANT: cap the block size to reduce truncation / malformed JSON
     block_capped = block[:12000]
 
     return (
@@ -139,44 +132,41 @@ Return ONLY valid JSON matching this schema. No markdown. No text.
     )
 
 
-
+# =============================
+# LLM EXTRACTION (OPENAI)
+# =============================
 def gemini_extract(block, header):
-    prompt = _build_gemini_prompt(block, header)
+    prompt = _build_prompt(block, header)
     st.caption(f"🧠 Prompt size: {len(prompt)} chars")
 
-    # SDK call (matches docs)
-    resp = client.models.generate_content(
+    response = client.chat.completions.create(
         model=MODEL,
-        contents=prompt,
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a precise financial document parser. Output ONLY valid JSON."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        response_format={"type": "json_object"},
     )
-    raw = (resp.text or "").strip()
 
-    st.caption(f"📨 Gemini response length: {len(raw)}")
-
-    if not raw:
-        st.error("❌ Gemini returned EMPTY response")
-
-
-    text = (resp.text or "").strip()
-    if not text:
-        raise ValueError("Empty response from Gemini")
-
-    # Cleanup if model wraps output
-    text = re.sub(r"^```json\s*", "", text)
-    text = re.sub(r"^```\s*", "", text)
-    text = re.sub(r"\s*```$", "", text).strip()
+    text = response.choices[0].message.content.strip()
+    st.caption(f"📨 OpenAI response length: {len(text)}")
 
     try:
         obj = json.loads(text)
     except json.JSONDecodeError as e:
         st.error("❌ JSON parsing failed")
         st.code(str(e))
-        with st.expander("🧠 Invalid JSON from Gemini"):
+        with st.expander("🧠 Invalid JSON from OpenAI"):
             st.text(text[:2000])
         raise
 
-
-    # Preserve your post-processing exactly
     for f in obj.get("facilities", []):
         for k in ("sanctioned_amount_inr", "drawing_power_inr", "outstanding_balance_inr"):
             if isinstance(f.get(k), str):
@@ -185,6 +175,9 @@ def gemini_extract(block, header):
     return ExtractionResult.model_validate(obj)
 
 
+# =============================
+# PDF + PIPELINE
+# =============================
 def extract_global_header(text: str) -> Dict[str, str]:
     m = re.search(
         r"^(.*?)\s*\|\s*Report Order Number\s*:\s*([A-Z0-9-]+)\s*\|\s*Report Order Date\s*:\s*([0-9/.-]+)",
@@ -203,9 +196,6 @@ def extract_text_from_pdf(file) -> str:
         text = "\n\n".join(page.extract_text() or "" for page in pdf.pages)
 
     st.info(f"📄 Extracted {len(text)} characters from PDF")
-    if len(text) < 500:
-        st.warning("⚠️ Very little text extracted — PDF may be scanned")
-
     return text
 
 
@@ -216,33 +206,19 @@ def run_llm_extraction(file) -> ExtractionResult:
 
     st.info(f"🧩 Found {len(blocks)} account blocks")
 
-# Optional: show preview of first block
     with st.expander("🔍 Preview first account block"):
         st.text(blocks[0][:1000] if blocks else "No blocks found")
 
-
-    # merged = ExtractionResult(**header, facilities=[])
-    # for i, b in enumerate(blocks):
-    #     st.caption(f"🚀 Sending block {i+1}/{len(blocks)} to Gemini ({len(b)} chars)")
-    #     partial = gemini_extract(b, header)
-
-    # for b in blocks:
-    #     partial = gemini_extract(b, header)
-    #     merged.facilities.extend(partial.facilities)
     merged = ExtractionResult(**header, facilities=[])
 
     TEST_LIMIT = 1
     test_blocks = blocks[:TEST_LIMIT]
-
     st.warning(f"🧪 TEST MODE: processing only first {len(test_blocks)} blocks")
 
     for i, b in enumerate(test_blocks):
-        st.caption(
-            f"🚀 Sending block {i+1}/{len(test_blocks)} to Gemini ({len(b)} chars)"
-        )
+        st.caption(f"🚀 Sending block {i+1}/{len(test_blocks)} ({len(b)} chars)")
         partial = gemini_extract(b, header)
         merged.facilities.extend(partial.facilities)
-
 
     uniq = {}
     for f in merged.facilities:
@@ -255,6 +231,9 @@ def run_llm_extraction(file) -> ExtractionResult:
     return merged
 
 
+# =============================
+# OUTPUT
+# =============================
 def to_dataframe(result: ExtractionResult) -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -285,7 +264,7 @@ st.title("📄 CIBIL / CMR LLM Extractor")
 uploaded_file = st.file_uploader("Upload CIBIL / CMR PDF", type=["pdf"])
 
 if uploaded_file:
-    with st.spinner("Extracting using Gemini…"):
+    with st.spinner("Extracting using OpenAI…"):
         result = run_llm_extraction(uploaded_file)
 
     df = to_dataframe(result)
