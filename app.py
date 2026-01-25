@@ -231,7 +231,7 @@ def run_llm_extraction(file) -> ExtractionResult:
     #     merged.facilities.extend(partial.facilities)
     merged = ExtractionResult(**header, facilities=[])
 
-    TEST_LIMIT = 3
+    TEST_LIMIT = 1
     test_blocks = blocks[:TEST_LIMIT]
 
     st.warning(f"🧪 TEST MODE: processing only first {len(test_blocks)} blocks")
