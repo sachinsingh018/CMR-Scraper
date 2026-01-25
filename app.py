@@ -139,7 +139,7 @@ Return ONLY valid JSON matching this schema. No markdown. No text.
     )
 
 
-@retry(...)
+
 def gemini_extract(block, header):
     prompt = _build_gemini_prompt(block, header)
     st.caption(f"🧠 Prompt size: {len(prompt)} chars")
