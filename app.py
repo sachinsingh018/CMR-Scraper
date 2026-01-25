@@ -1,13 +1,17 @@
 import re
 import json
-import requests
+import os
 import pdfplumber
 import pandas as pd
 import streamlit as st
 from io import BytesIO
 from tenacity import retry, stop_after_attempt, wait_exponential
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any
+
+# NEW: Gemini official Python SDK
+from google import genai
+
 
 # =============================
 # CONFIG
@@ -17,11 +21,15 @@ if not GEMINI_API_KEY:
     st.error("Missing GEMINI_API_KEY in Streamlit secrets")
     st.stop()
 
+# SDK expects env var by default
+os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
+
+# Choose model (you can swap to gemini-2.5-flash if you want)
 MODEL = "gemini-2.5-flash"
-API_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{MODEL}:generateContent?key={GEMINI_API_KEY}"
-)
+
+# Create client once
+client = genai.Client()
+
 
 # =============================
 # DATA MODELS
@@ -41,16 +49,19 @@ class Facility(BaseModel):
     is_delinquent: Optional[bool] = None
     adverse_information: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 
+
 class ExtractionResult(BaseModel):
     company_name: Optional[str] = None
     report_order_number: Optional[str] = None
     report_order_date: Optional[str] = None
     facilities: List[Facility] = Field(default_factory=list)
 
+
 # =============================
 # HELPERS
 # =============================
 RUPEE = "₹"
+
 
 def normalize_text(s: str) -> str:
     if not s:
@@ -59,6 +70,7 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"[ \t]+", " ", s)
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
+
 
 def parse_inr_amount(raw: str) -> Optional[float]:
     if not raw:
@@ -75,6 +87,7 @@ def parse_inr_amount(raw: str) -> Optional[float]:
         return val * 100_000
     return val
 
+
 def split_account_blocks(text: str) -> List[str]:
     text = normalize_text(text)
     parts = re.split(r"(?=A/C:\s*)", text, flags=re.IGNORECASE)
@@ -84,8 +97,9 @@ def split_account_blocks(text: str) -> List[str]:
         if re.search(r"\bA/C:\s*", p, re.IGNORECASE) and len(p) > 150
     ]
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
-def gemini_extract(block: str, header: Dict[str, str]) -> ExtractionResult:
+
+def _build_gemini_prompt(block: str, header: Dict[str, str]) -> str:
+    # Keep your schema + approach exactly; only change transport layer to SDK.
     system_prompt = """
 Return ONLY valid JSON matching this schema. No markdown. No text.
 
@@ -111,33 +125,42 @@ Return ONLY valid JSON matching this schema. No markdown. No text.
     }
   ]
 }
-"""
+""".strip()
 
-    payload = {
-        "contents": [{
-            "role": "user",
-            "parts": [{
-                "text": system_prompt
-                + "\n\nHEADER:\n"
-                + json.dumps(header)
-                + "\n\nBLOCK:\n"
-                + block
-            }]
-        }],
-        "generationConfig": {
-            "temperature": 0,
-            "topP": 0.1,
-            "maxOutputTokens": 2048
-        }
-    }
+    # IMPORTANT: cap the block size to reduce truncation / malformed JSON
+    block_capped = block[:12000]
 
-    r = requests.post(API_URL, json=payload, timeout=60)
-    r.raise_for_status()
-    text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    return (
+        system_prompt
+        + "\n\nHEADER:\n"
+        + json.dumps(header, ensure_ascii=False)
+        + "\n\nBLOCK:\n"
+        + block_capped
+    )
 
-    text = re.sub(r"^```json|```$", "", text).strip()
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+def gemini_extract(block: str, header: Dict[str, str]) -> ExtractionResult:
+    prompt = _build_gemini_prompt(block, header)
+
+    # SDK call (matches docs)
+    resp = client.models.generate_content(
+        model=MODEL,
+        contents=prompt,
+    )
+
+    text = (resp.text or "").strip()
+    if not text:
+        raise ValueError("Empty response from Gemini")
+
+    # Cleanup if model wraps output
+    text = re.sub(r"^```json\s*", "", text)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"\s*```$", "", text).strip()
+
     obj = json.loads(text)
 
+    # Preserve your post-processing exactly
     for f in obj.get("facilities", []):
         for k in ("sanctioned_amount_inr", "drawing_power_inr", "outstanding_balance_inr"):
             if isinstance(f.get(k), str):
@@ -145,21 +168,24 @@ Return ONLY valid JSON matching this schema. No markdown. No text.
 
     return ExtractionResult.model_validate(obj)
 
+
 def extract_global_header(text: str) -> Dict[str, str]:
     m = re.search(
         r"^(.*?)\s*\|\s*Report Order Number\s*:\s*([A-Z0-9-]+)\s*\|\s*Report Order Date\s*:\s*([0-9/.-]+)",
         text,
-        re.MULTILINE
+        re.MULTILINE,
     )
     return {
         "company_name": m.group(1).strip() if m else None,
         "report_order_number": m.group(2).strip() if m else None,
-        "report_order_date": m.group(3).strip() if m else None
+        "report_order_date": m.group(3).strip() if m else None,
     }
+
 
 def extract_text_from_pdf(file) -> str:
     with pdfplumber.open(file) as pdf:
         return "\n\n".join(page.extract_text() or "" for page in pdf.pages)
+
 
 def run_llm_extraction(file) -> ExtractionResult:
     text = extract_text_from_pdf(file)
@@ -182,14 +208,20 @@ def run_llm_extraction(file) -> ExtractionResult:
     merged.facilities = [v[1] for v in uniq.values()]
     return merged
 
+
 def to_dataframe(result: ExtractionResult) -> pd.DataFrame:
-    return pd.DataFrame([
-        {**f.model_dump(),
-         "company_name": result.company_name,
-         "report_order_number": result.report_order_number,
-         "report_order_date": result.report_order_date}
-        for f in result.facilities
-    ])
+    return pd.DataFrame(
+        [
+            {
+                **f.model_dump(),
+                "company_name": result.company_name,
+                "report_order_number": result.report_order_number,
+                "report_order_date": result.report_order_date,
+            }
+            for f in result.facilities
+        ]
+    )
+
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     buf = BytesIO()
@@ -197,6 +229,7 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False, sheet_name="Facilities")
     buf.seek(0)
     return buf.getvalue()
+
 
 # =============================
 # STREAMLIT UI
@@ -217,5 +250,5 @@ if uploaded_file:
         "⬇️ Download Excel",
         df_to_excel_bytes(df),
         "cibil_facilities_extracted.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
