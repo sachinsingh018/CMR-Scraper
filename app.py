@@ -221,14 +221,28 @@ def run_llm_extraction(file) -> ExtractionResult:
         st.text(blocks[0][:1000] if blocks else "No blocks found")
 
 
-    merged = ExtractionResult(**header, facilities=[])
-    for i, b in enumerate(blocks):
-        st.caption(f"🚀 Sending block {i+1}/{len(blocks)} to Gemini ({len(b)} chars)")
-        partial = gemini_extract(b, header)
+    # merged = ExtractionResult(**header, facilities=[])
+    # for i, b in enumerate(blocks):
+    #     st.caption(f"🚀 Sending block {i+1}/{len(blocks)} to Gemini ({len(b)} chars)")
+    #     partial = gemini_extract(b, header)
 
-    for b in blocks:
+    # for b in blocks:
+    #     partial = gemini_extract(b, header)
+    #     merged.facilities.extend(partial.facilities)
+    merged = ExtractionResult(**header, facilities=[])
+
+    TEST_LIMIT = 3
+    test_blocks = blocks[:TEST_LIMIT]
+
+    st.warning(f"🧪 TEST MODE: processing only first {len(test_blocks)} blocks")
+
+    for i, b in enumerate(test_blocks):
+        st.caption(
+            f"🚀 Sending block {i+1}/{len(test_blocks)} to Gemini ({len(b)} chars)"
+        )
         partial = gemini_extract(b, header)
         merged.facilities.extend(partial.facilities)
+
 
     uniq = {}
     for f in merged.facilities:
