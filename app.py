@@ -25,7 +25,7 @@ if not GEMINI_API_KEY:
 os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
 
 # Choose model (you can swap to gemini-2.5-flash if you want)
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-2.0-flash"
 
 # Create client once
 client = genai.Client()
