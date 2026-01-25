@@ -141,6 +141,7 @@ Return ONLY valid JSON matching this schema. No markdown. No text.
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 def gemini_extract(block: str, header: Dict[str, str]) -> ExtractionResult:
+    st.caption(f"🧠 Prompt size: {len(prompt)} chars")
     prompt = _build_gemini_prompt(block, header)
 
     # SDK call (matches docs)
@@ -221,6 +222,9 @@ def run_llm_extraction(file) -> ExtractionResult:
 
 
     merged = ExtractionResult(**header, facilities=[])
+    for i, b in enumerate(blocks):
+        st.caption(f"🚀 Sending block {i+1}/{len(blocks)} to Gemini ({len(b)} chars)")
+        partial = gemini_extract(b, header)
 
     for b in blocks:
         partial = gemini_extract(b, header)
