@@ -2,6 +2,6 @@ streamlit
 pdfplumber
 pandas
 openpyxl
-requests 
-tenacity 
 pydantic
+tenacity
+google-genai
