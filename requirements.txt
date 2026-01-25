@@ -2,3 +2,6 @@ streamlit
 pdfplumber
 pandas
 openpyxl
+requests 
+tenacity 
+pydantic
