@@ -148,6 +148,13 @@ def gemini_extract(block: str, header: Dict[str, str]) -> ExtractionResult:
         model=MODEL,
         contents=prompt,
     )
+    raw = (resp.text or "").strip()
+
+    st.caption(f"📨 Gemini response length: {len(raw)}")
+
+    if not raw:
+        st.error("❌ Gemini returned EMPTY response")
+
 
     text = (resp.text or "").strip()
     if not text:
@@ -158,7 +165,15 @@ def gemini_extract(block: str, header: Dict[str, str]) -> ExtractionResult:
     text = re.sub(r"^```\s*", "", text)
     text = re.sub(r"\s*```$", "", text).strip()
 
-    obj = json.loads(text)
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as e:
+        st.error("❌ JSON parsing failed")
+        st.code(str(e))
+        with st.expander("🧠 Invalid JSON from Gemini"):
+            st.text(text[:2000])
+        raise
+
 
     # Preserve your post-processing exactly
     for f in obj.get("facilities", []):
@@ -184,13 +199,26 @@ def extract_global_header(text: str) -> Dict[str, str]:
 
 def extract_text_from_pdf(file) -> str:
     with pdfplumber.open(file) as pdf:
-        return "\n\n".join(page.extract_text() or "" for page in pdf.pages)
+        text = "\n\n".join(page.extract_text() or "" for page in pdf.pages)
+
+    st.info(f"📄 Extracted {len(text)} characters from PDF")
+    if len(text) < 500:
+        st.warning("⚠️ Very little text extracted — PDF may be scanned")
+
+    return text
 
 
 def run_llm_extraction(file) -> ExtractionResult:
     text = extract_text_from_pdf(file)
     header = extract_global_header(text)
     blocks = split_account_blocks(text)
+
+    st.info(f"🧩 Found {len(blocks)} account blocks")
+
+# Optional: show preview of first block
+    with st.expander("🔍 Preview first account block"):
+        st.text(blocks[0][:1000] if blocks else "No blocks found")
+
 
     merged = ExtractionResult(**header, facilities=[])
 
