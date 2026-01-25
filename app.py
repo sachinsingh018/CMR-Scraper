@@ -1,165 +1,271 @@
-import streamlit as st
+import os
+import re
+import json
+import requests
 import pdfplumber
 import pandas as pd
-import re
-import io
+from tenacity import retry, stop_after_attempt, wait_exponential
+from pydantic import BaseModel, Field, ValidationError
+from typing import List, Optional, Literal, Dict, Any
 
-st.set_page_config(page_title="CIBIL Credit Facility Extractor", layout="wide")
-st.title("📄 Company CIBIL – Credit Facility Extractor")
+# -----------------------------
+# Config
+# -----------------------------
+GEMINI_API_KEY = "AIzaSyB4iljwvtSPEF300Okg0cpRwOxj_f9LBZ8"
+if not GEMINI_API_KEY:
+    raise RuntimeError("Missing GEMINI_API_KEY env var")
 
-uploaded_file = st.file_uploader("Upload CIBIL PDF", type=["pdf"])
+# Pick a Gemini model you have access to
+# Options often include: gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash, gemini-2.5-flash
+MODEL = "gemini-2.5-flash"
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={GEMINI_API_KEY}"
 
+# -----------------------------
+# Output schema (strict-ish)
+# -----------------------------
+class Facility(BaseModel):
+    bank: Optional[str] = None
+    lender: Optional[str] = None  # sometimes lender != bank
+    facility_type: Optional[str] = None  # e.g., Demand loan, Bank guarantee, Cash credit
+    account_number: Optional[str] = None  # the "A/C: ...." identifier
+    status_open_closed: Optional[Literal["OPEN", "CLOSED"]] = None
+    asset_classification: Optional[str] = None  # STANDARD / DOUBTFUL / SUB-STANDARD / NPA etc.
+    sanctioned_amount_inr: Optional[float] = None
+    drawing_power_inr: Optional[float] = None
+    outstanding_balance_inr: Optional[float] = None
+    last_reported_date: Optional[str] = None  # keep as string; parse later if needed
+    sanctioned_date: Optional[str] = None
 
-# -------------------------
+    # Useful flags
+    is_delinquent: Optional[bool] = None
+    adverse_information: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+
+class ExtractionResult(BaseModel):
+    company_name: Optional[str] = None
+    report_order_number: Optional[str] = None
+    report_order_date: Optional[str] = None
+    facilities: List[Facility] = Field(default_factory=list)
+
+# -----------------------------
 # Helpers
-# -------------------------
+# -----------------------------
+RUPEE = "₹"
 
-def normalize_text(text):
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{2,}", "\n", text)
-    return text.strip()
-
-def extract(pattern, text):
-    m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-    return m.group(1).strip() if m else ""
-
-def clean_amount(val):
-    if not val:
+def normalize_text(s: str) -> str:
+    if not s:
         return ""
-    return re.sub(r"[₹, ]", "", val)
+    # normalize weird hyphens, whitespace
+    s = s.replace("\u2013", "-").replace("\u2014", "-").replace("\u00ad", "")
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
 
-def extract_bank_and_loan(block):
-    lines = [l.strip() for l in block.splitlines() if l.strip()]
+def parse_inr_amount(raw: str) -> Optional[float]:
+    """
+    Convert strings like:
+      '₹3.1 Cr', '₹ 40.3 Lac', '₹2,24,49,387', '40,28,020', '9490.0'
+    into numeric INR.
+    """
+    if not raw:
+        return None
+    t = raw.replace(RUPEE, "").replace(",", "").strip()
+    # handle "Cr"/"Lac"
+    m = re.match(r"^([0-9]*\.?[0-9]+)\s*(Cr|Lac|Lakhs|Lakh)?$", t, re.IGNORECASE)
+    if not m:
+        return None
+    val = float(m.group(1))
+    unit = (m.group(2) or "").lower()
+    if unit == "cr":
+        return val * 10_000_000
+    if unit in ("lac", "lakh", "lakhs"):
+        return val * 100_000
+    return val
 
-    bank = ""
-    loan = ""
+def split_account_blocks(full_text: str) -> List[str]:
+    """
+    CIBIL facility sections reliably contain "A/C:" anchors.
+    We'll split by occurrences of 'A/C:' and keep header context.
+    """
+    text = normalize_text(full_text)
 
-    for i, line in enumerate(lines):
-        if line.startswith("A/C:"):
-            # walk backwards safely
-            for j in range(i - 1, -1, -1):
-                txt = lines[j]
+    # Keep some header context before the first A/C by injecting a marker
+    parts = re.split(r"(?=A/C:\s*)", text, flags=re.IGNORECASE)
+    # Filter: keep only chunks that actually look like a facility
+    blocks = []
+    for p in parts:
+        if re.search(r"\bA/C:\s*", p, re.IGNORECASE) and (len(p) > 150):
+            blocks.append(p.strip())
+    return blocks
 
-                # bank names are FULL CAPS and short
-                if re.fullmatch(r"[A-Z ]{5,}", txt) and "DISPUTE" not in txt:
-                    bank = txt
-                    continue
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
+def gemini_extract(block: str, global_header: Dict[str, str]) -> ExtractionResult:
+    """
+    Send a single block to Gemini and ask for STRICT JSON matching ExtractionResult.
+    We pass global header so the model can copy company/order fields consistently.
+    """
 
-                # loan type is usually Title Case
-                if bank and loan == "":
-                    loan = txt
-                    break
+    system_instructions = f"""
+You are extracting structured data from an Indian Company Credit Report (CIBIL).
+Return ONLY valid JSON. No markdown. No commentary.
 
-            break
+Rules:
+- Output must match this schema:
+{{
+  "company_name": string|null,
+  "report_order_number": string|null,
+  "report_order_date": string|null,
+  "facilities": [
+    {{
+      "bank": string|null,
+      "lender": string|null,
+      "facility_type": string|null,
+      "account_number": string|null,
+      "status_open_closed": "OPEN"|"CLOSED"|null,
+      "asset_classification": string|null,
+      "sanctioned_amount_inr": number|null,
+      "drawing_power_inr": number|null,
+      "outstanding_balance_inr": number|null,
+      "last_reported_date": string|null,
+      "sanctioned_date": string|null,
+      "is_delinquent": boolean|null,
+      "adverse_information": [{{"amount": any, "reported_on": any, "type": any, "status": any}}]
+    }}
+  ]
+}}
 
-    return bank, loan
+- If you see currency like '₹3.1 Cr' or '₹40.3 Lac' convert to INR number.
+- If missing, use null (not empty string).
+- Pull only facts present in the provided text.
+"""
 
+    header_json = json.dumps(global_header, ensure_ascii=False)
+    user_prompt = f"""
+GLOBAL HEADER (use if present):
+{header_json}
 
-# -------------------------
-# Main
-# -------------------------
+FACILITY TEXT BLOCK:
+{block}
+"""
 
-if uploaded_file:
-    with st.spinner("Extracting text from PDF..."):
-        with pdfplumber.open(uploaded_file) as pdf:
-            raw_text = "\n".join(
-                page.extract_text() or ""
-                for page in pdf.pages[4:]  # PAGE 7 ONWARDS (0-based)
-            )
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": system_instructions + "\n\n" + user_prompt}]}
+        ],
+        "generationConfig": {
+            "temperature": 0.0,
+            "topP": 0.1,
+            "maxOutputTokens": 2048
+        }
+    }
 
-    full_text = normalize_text(raw_text)
-    st.success(f"Characters extracted: {len(full_text)}")
+    resp = requests.post(API_URL, json=payload, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
 
-    start = re.search(
-    r"CREDIT\s+FACILITY\s+DETAILS",
-    full_text,
-    re.IGNORECASE | re.MULTILINE
-        )
+    # Gemini response text
+    text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-    if not start:
-        st.error("CREDIT FACILITY DETAILS section not found")
-        st.stop()
+    # Hard cleanup: sometimes models wrap with ```json
+    text = re.sub(r"^```json\s*", "", text)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
 
-    # isolate only the CREDIT FACILITY DETAILS body
-    #credit_text = credit_text.split("LIST OF CREDIT FACILITIES AS GUARANTOR")[0]
-    # isolate only the CREDIT FACILITY DETAILS body
-    credit_text = full_text[start.start():]
-    credit_text = credit_text.split("LIST OF CREDIT FACILITIES AS GUARANTOR")[0]
+    # Parse JSON -> validate
+    obj = json.loads(text)
 
-# split when a BANK NAME starts (full caps line)
-    blocks = re.split(
-            r"\n(?=[A-Z][A-Z ]+\n[A-Za-z])",
-            credit_text
-        )
+    # Convert any string amounts Gemini didn't convert (belt-and-suspenders)
+    for f in obj.get("facilities", []):
+        for k in ("sanctioned_amount_inr", "drawing_power_inr", "outstanding_balance_inr"):
+            if isinstance(f.get(k), str):
+                f[k] = parse_inr_amount(f[k])
 
+    try:
+        return ExtractionResult.model_validate(obj)
+    except ValidationError as ve:
+        raise RuntimeError(f"Schema validation failed: {ve}\nRaw:\n{text}")
 
-    blocks = [
-        blocks[i - 1] + "\n" + blocks[i] if i > 0 else blocks[i]
-        for i in range(len(blocks))
-        ]
+def extract_global_header(text: str) -> Dict[str, str]:
+    """
+    Capture company/order fields once from the whole document text.
+    """
+    t = normalize_text(text)
+    # This report has: "Dhruv Containers Private Limited | Report Order Number : W-... | Report Order Date : 19/01/2026"
+    company = None
+    order_no = None
+    order_date = None
 
+    m = re.search(r"^(.*?)\s*\|\s*Report Order Number\s*:\s*([A-Z0-9-]+)\s*\|\s*Report Order Date\s*:\s*([0-9/.-]+)",
+                  t, re.IGNORECASE | re.MULTILINE)
+    if m:
+        company = m.group(1).strip()
+        order_no = m.group(2).strip()
+        order_date = m.group(3).strip()
 
-    st.caption(f"Facility blocks found: {len(blocks)}")
+    return {
+        "company_name": company or None,
+        "report_order_number": order_no or None,
+        "report_order_date": order_date or None
+    }
 
-    records = []
+def extract_text_from_pdf(pdf_path: str) -> str:
+    all_text = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            txt = page.extract_text() or ""
+            all_text.append(txt)
+    return "\n\n".join(all_text)
 
-    for block in blocks:
-        if "A/C:" not in block:
-            continue
+def run_llm_extraction(pdf_path: str) -> ExtractionResult:
+    raw_text = extract_text_from_pdf(pdf_path)
+    header = extract_global_header(raw_text)
 
-        bank_name, loan_type = extract_bank_and_loan(block)
+    blocks = split_account_blocks(raw_text)
 
-        records.append({
-            "Bank Name": bank_name,
-            "Loan Type": loan_type,
-            "Account Number": extract(r"A/C:\s*([A-Z0-9/-]+)", block),
-            "Account Status": extract(r"\b(OPEN|CLOSED)\b", block),
-            "Days Past Due": extract(
-                r"(\d+\s*DAY[S]?\s*PAST\s*DUE)",
-                block
-            ),
-            "Asset Classification": extract(
-                r"\b(STANDARD|SUB-STANDARD|DOUBTFUL|LOSS|NPA)\b",
-                block
-            ),
-
-            "Sanctioned Amount": clean_amount(
-                extract(r"SANCTIONED AMOUNT ₹([0-9,]+)", block)
-            ),
-            "Outstanding Balance": clean_amount(
-                extract(r"OUTSTANDING BALANCE ₹([0-9,-]+)", block)
-            ),
-            "Sanctioned Date": extract(
-                r"SANCTIONED DATE\s+([0-9A-Za-z ,]+)", block
-            ),
-            "Last Reported Date": extract(
-                r"Last Reported[\s\S]{0,80}?([0-9]{1,2}\s+[A-Za-z]{3},?\s+[0-9]{4})",
-                block
-            ),
-
-            "Repayment Frequency": extract(
-                r"REPAYMENT FREQUENCY\s*([A-Za-z]+)", block
-            ),
-            "Loan Expiry / Maturity": extract(
-                r"LOAN EXPIRY/MATURITY\s*([0-9A-Za-z -]+)", block
-            ),
-            "Suit Filed": "Yes" if "SUIT FILED" in block.upper() else "No",
-            "Written Off": "Yes" if "WRITTEN OFF" in block.upper() else "No",
-            "NPA": "Yes" if re.search(r"\bNPA\b", block.upper()) else "No",
-        })
-
-    df = pd.DataFrame(records)
-
-    st.subheader("📊 Extracted Credit Facilities")
-    st.dataframe(df, use_container_width=True)
-
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf) as writer:
-        df.to_excel(writer, index=False)
-
-    st.download_button(
-        "⬇️ Download Excel",
-        buf.getvalue(),
-        "company_cibil_credit_facilities.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    # If you also want to include the "LIST OF CREDIT FACILITIES" summary page (page 4),
+    # you can create extra blocks based on that header — but A/C blocks cover details well.
+    merged = ExtractionResult(
+        company_name=header.get("company_name"),
+        report_order_number=header.get("report_order_number"),
+        report_order_date=header.get("report_order_date"),
+        facilities=[]
     )
+
+    for b in blocks:
+        partial = gemini_extract(b, header)
+        merged.facilities.extend(partial.facilities)
+
+    # Deduplicate by account_number (sometimes repeated across pages)
+    uniq = {}
+    for f in merged.facilities:
+        key = (f.account_number or "").strip().upper()
+        if not key:
+            # fall back on (bank + facility_type + last_reported_date)
+            key = f"{f.bank}|{f.facility_type}|{f.last_reported_date}"
+        # keep the richer record (more non-nulls)
+        score = sum(v is not None and v != [] for v in f.model_dump().values())
+        if key not in uniq or score > uniq[key][0]:
+            uniq[key] = (score, f)
+    merged.facilities = [v[1] for v in uniq.values()]
+
+    return merged
+
+def to_dataframe(result: ExtractionResult) -> pd.DataFrame:
+    rows = []
+    for f in result.facilities:
+        d = f.model_dump()
+        d["company_name"] = result.company_name
+        d["report_order_number"] = result.report_order_number
+        d["report_order_date"] = result.report_order_date
+        rows.append(d)
+    return pd.DataFrame(rows)
+
+if __name__ == "__main__":
+    pdf_path = "/mnt/data/Report_W-565043764 19.01.2026.pdf"
+    res = run_llm_extraction(pdf_path)
+    df = to_dataframe(res)
+
+    # Save to Excel
+    out = "cibil_facilities_extracted.xlsx"
+    df.to_excel(out, index=False)
+    print(f"Extracted facilities: {len(df)}")
+    print(f"Saved: {out}")
