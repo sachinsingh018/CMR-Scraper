@@ -139,10 +139,10 @@ Return ONLY valid JSON matching this schema. No markdown. No text.
     )
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
-def gemini_extract(block: str, header: Dict[str, str]) -> ExtractionResult:
-    st.caption(f"🧠 Prompt size: {len(prompt)} chars")
+@retry(...)
+def gemini_extract(block, header):
     prompt = _build_gemini_prompt(block, header)
+    st.caption(f"🧠 Prompt size: {len(prompt)} chars")
 
     # SDK call (matches docs)
     resp = client.models.generate_content(
