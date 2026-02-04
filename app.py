@@ -211,14 +211,19 @@ def run_llm_extraction(file) -> ExtractionResult:
 
     merged = ExtractionResult(**header, facilities=[])
 
-    TEST_LIMIT = 1
-    test_blocks = blocks[:TEST_LIMIT]
-    st.warning(f"🧪 TEST MODE: processing only first {len(test_blocks)} blocks")
+    test_blocks = blocks
+    st.info(f"🚀 PRODUCTION MODE: processing all {len(test_blocks)} blocks")
+
 
     for i, b in enumerate(test_blocks):
         st.caption(f"🚀 Sending block {i+1}/{len(test_blocks)} ({len(b)} chars)")
-        partial = gemini_extract(b, header)
-        merged.facilities.extend(partial.facilities)
+        try:
+            partial = gemini_extract(b, header)
+            merged.facilities.extend(partial.facilities)
+        except Exception as e:
+            st.error(f"❌ Failed on block {i+1}: {e}")
+            continue
+
 
     uniq = {}
     for f in merged.facilities:
